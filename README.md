@@ -292,13 +292,13 @@ class "pool1-clients" {
     match hardware;
 }
 subclass "pool1-clients" 1:02:42:6c:43:66:00; # MAC itadori
-subclass "pool1-clients" 1:02:42:1d:9e:34:00; # MAC fushiguro
+subclass "pool1-clients" 1:02:42:0e:6c:c7:00; # MAC fushiguro
 
 class "pool2-clients" {
     match hardware;
 }
 subclass "pool2-clients" 1:02:42:cb:7a:f8:00; # MAC zenin
-subclass "pool2-clients" 1:02:42:0e:6c:c7:00; # MAC okkotsu
+subclass "pool2-clients" 1:02:42:1d:9e:34:00; # MAC okkotsu
 
 # Subnet Network 2 dengan Pemisahan Dua Pool
 subnet 192.218.2.0 netmask 255.255.255.0 {
@@ -566,7 +566,21 @@ Penyelesaian soal ini berfokus pada audit dan verifikasi menyeluruh terhadap dis
 
 ---
 
-#### 1. Ringkasan Hasil Audit Jaringan Seluruh Klien
+#### 1. Penyesuaian Parameter DNS Global pada tengen
+Agar seluruh subnet (Divisi A dan Divisi B) secara serentak menerima parameter DNS internal dan search domain tanpa redundansi konfigurasi pada masing-masing subnet, opsi DNS dipindahkan ke tingkat global pada `/etc/dhcp/dhcpd.conf`:
+
+```text
+# Parameter Global Berlaku Menyeluruh
+default-lease-time 600;
+max-lease-time 7200;
+authoritative;
+
+option domain-name-servers 192.218.1.2, 192.218.1.3;
+option domain-name "k14.com";
+option domain-search "k14.com";
+```
+
+#### 2. Ringkasan Hasil Audit Jaringan Seluruh Klien
 
 Hasil verifikasi konfigurasi IP, rute default, serta DNS resolver pada seluruh node klien menghasilkan pemetaan berikut:
 
@@ -583,7 +597,7 @@ Hasil verifikasi konfigurasi IP, rute default, serta DNS resolver pada seluruh n
 
 ---
 
-#### 2. Pembuktian dan Verifikasi
+#### 3. Pembuktian dan Verifikasi
 
 **A. Verifikasi Konfigurasi Klien Divisi A (Network 2)**  
 Pengujian dilakukan pada perwakilan klien Divisi A (`itadori` mewakili Pool 1 dan `zenin` mewakili Pool 2) dengan memeriksa antarmuka, tabel rute, dan DNS:
@@ -729,3 +743,173 @@ Berdasarkan hasil tangkapan paket di atas, parameter protokol DHCP diidentifikas
 
 **Kesesuaian Field `giaddr`:**  
 Nilai `Gateway-IP 192.218.2.1` yang tercatat pada paket membuktikan bahwa DHCP Relay pada node `jichi` bekerja secara presisi. Server `tengen` menggunakan nilai `giaddr` ini untuk menentukan blok subnet mana yang cocok (`subnet 192.218.2.0 netmask 255.255.255.0`), kemudian mencocokkan MAC Address klien (`02:42:6c:43:66:00`) ke dalam kelas `pool1-clients` sebelum mengirimkan paket balasan `DHCPOFFER` dan `DHCPACK` kembali ke relay.
+
+### Soal 9 - Satrio
+> Sebuah gangguan memutus jalur relay dan membuat permintaan alamat tidak sampai ke Data Center. Hentikan service DHCP Relay pada jichi, lalu paksa salah satu client di Network 2 atau Network 3 meminta lease baru dan catat gejalanya. Pulihkan service relay, ulangi permintaan DHCP, lalu buktikan bahwa client kembali memperoleh alamat dari pool yang benar dengan gateway semula.
+
+Pengujian ini bertujuan untuk mengamati dan mendokumentasikan perilaku sistem jaringan ketika terjadi kegagalan pada komponen perantara (*DHCP Relay*) di node router `jichi`, serta membuktikan resiliensi sistem saat layanan dipulihkan kembali. Dalam arsitektur multinetwork, paket broadcast `DHCPDISCOVER` dari klien di Network 2 (Divisi A) maupun Network 3 (Divisi B) tidak dapat menembus batas broadcast domain menuju Data Center (Network 4) tanpa bantuan relay agent.
+
+---
+
+#### 1. Simulasi Gangguan: Penghentian Layanan DHCP Relay pada jichi
+Gangguan disimulasikan dengan mematikan proses daemon `dhcrelay` pada router `jichi`:
+
+```bash
+pkill dhcrelay 2>/dev/null
+ps aux | grep dhcrelay
+```
+Pemeriksaan proses memastikan bahwa tidak ada lagi daemon DHCP Relay yang aktif pada router.
+![Penghentian DHCP Relay pada jichi](Screenshot/9.1-stop-dhcrelay-jichi.png)
+
+---
+
+#### 2. Pengamatan dan Pencatatan Gejala pada Klien (itadori)
+Dalam kondisi relay terputus, permohonan sewa alamat baru dipicu secara paksa dari node klien `itadori` (Network 2):
+
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+udhcpc -i eth0
+ip a show dev eth0
+```
+
+**Gejala Kegagalan yang Teramati:**
+1. **Kegagalan Pertukaran Handshake**: Klien hanya dapat mengirimkan paket broadcast pencarian server secara berulang (`udhcpc: broadcasting discover`) tanpa pernah menerima paket `DHCPOFFER`.
+2. **Ketiadaan Respon**: Karena router `jichi` tidak lagi meneruskan paket broadcast tersebut ke server `tengen` (`192.218.4.10`), server tidak menyadari adanya permintaan alamat dari subnet klien.
+3. **Hilangnya Konfigurasi Jaringan**: Klien mengalami *timeout*, antarmuka `eth0` tidak memiliki alamat IP (`inet`), dan seluruh konektivitas keluar terputus.
+![Gejala Kegagalan Permintaan DHCP pada Klien](Screenshot/9.2-gejala-kegagalan-client.png)
+
+---
+
+#### 3. Pemulihan Layanan DHCP Relay pada jichi
+Layanan perantara diaktifkan kembali pada node `jichi` dengan mendengarkan antarmuka Divisi A (`eth2`), Divisi B (`eth3`), dan Data Center (`eth4`) menuju target server `tengen`:
+
+```bash
+dhcrelay -4 -i eth2 -i eth3 -i eth4 192.218.4.10
+ps aux | grep dhcrelay
+```
+Output perintah membuktikan proses `dhcrelay` kembali berstatus aktif di latar belakang.
+![Pemulihan Layanan DHCP Relay pada jichi](Screenshot/9.3-restore-dhcrelay-jichi.png)
+
+---
+
+#### 4. Pembuktian dan Verifikasi Pemulihan pada Klien
+Setelah jalur relay pulih, permintaan sewa alamat dinamis diulang kembali dari node `itadori`:
+
+```bash
+udhcpc -i eth0
+ip a show dev eth0
+ip route
+```
+
+**Hasil Verifikasi Pemulihan:**
+* **Perolehan Alamat Cepat**: Klien segera menyelesaikan 4-way handshake dan mendapatkan respon alokasi: `lease of 192.218.2.11 obtained from 192.218.4.10`.
+* **Kepatuhan Kebijakan Pool**: Alamat IP yang diperoleh (`192.218.2.11`) kembali berada di dalam batas Pool 1 Divisi A (`192.218.2.10` s.d. `192.218.2.35`).
+* **Pemulihan Gateway Semula**: Tabel perutean mengonfirmasi gateway terpasang kembali ke antarmuka semula (`default via 192.218.2.1 dev eth0`).
+![Verifikasi Pemulihan Alamat dan Routing itadori](Screenshot/9.4-pemulihan-lease-client.png)
+
+### Soal 10 - Satrio
+> Setelah gangguan Shibuya tertangani, pastikan pemulihan bertahan setelah restart. Aktifkan autostart DHCP Server pada tengen dan DHCP Relay pada jichi, lalu restart kedua node. Verifikasi status layanan, IP, gateway, lease, dan konektivitas client Network 2-3. Pastikan kebijakan Pool 1, Pool 2, short lease, long lease, dan fixed address tetap berlaku.
+
+Penyelesaian soal ini berfokus pada ketahanan persistensi layanan (*service persistence*) dengan mengonfigurasi mekanisme peluncuran otomatis (*autostart*) untuk DHCP Server di node `tengen` (`192.218.4.10`) dan DHCP Relay di router `jichi`. Dalam lingkungan container Docker, proses latar belakang (*daemon*) tidak berjalan secara default setelah container di-restart kecuali didaftarkan ke skrip inisialisasi sistem (`/etc/rc.local` dan profil bash). Pengujian dilakukan dengan mematikan dan menyalakan kembali (*restart*) kedua node infrastruktur, kemudian menguji apakah seluruh alokasi kebijakan sewa (Pool 1, Pool 2, Short Lease, Long Lease, dan Fixed Address) serta rute gateway tetap bekerja tanpa intervensi manual.
+
+---
+
+#### 1. Implementasi Autostart pada Node Infrastruktur
+
+**A. Autostart DHCP Server pada Node tengen**  
+Skrip inisialisasi `/root/autostart_dhcp.sh` dibuat untuk mengonfigurasi ulang alamat IP antarmuka `eth0`, rute default ke gateway `192.218.4.1`, serta menyalakan daemon `dhcpd`:
+```bash
+cat << 'EOF' > /root/autostart_dhcp.sh
+#!/bin/bash
+ip addr flush dev eth0 2>/dev/null
+ip addr add 192.218.4.10/24 dev eth0
+ip link set eth0 up
+ip route replace default via 192.218.4.1 dev eth0
+
+pkill dhcpd 2>/dev/null
+service isc-dhcp-server start || dhcpd -4 -cf /etc/dhcp/dhcpd.conf
+EOF
+chmod +x /root/autostart_dhcp.sh
+
+# Daftarkan pada /etc/rc.local dan /root/.bashrc
+cat << 'EOF' > /etc/rc.local
+#!/bin/bash
+/root/autostart_dhcp.sh
+exit 0
+EOF
+chmod +x /etc/rc.local
+grep -q "autostart_dhcp.sh" /root/.bashrc || echo '/root/autostart_dhcp.sh' >> /root/.bashrc
+```
+
+**B. Autostart Routing dan DHCP Relay pada Node jichi**  
+Skrip inisialisasi `/root/autostart_relay.sh` disiapkan untuk menetapkan seluruh alamat gateway antarmuka `eth1`–`eth4`, mengaktifkan kernel packet forwarding, aturan NAT MASQUERADE, serta mengeksekusi daemon `dhcrelay`:
+```bash
+cat << 'EOF' > /root/autostart_relay.sh
+#!/bin/bash
+ip link set eth1 up && ip addr flush dev eth1 && ip addr add 192.218.1.1/24 dev eth1
+ip link set eth2 up && ip addr flush dev eth2 && ip addr add 192.218.2.1/24 dev eth2
+ip link set eth3 up && ip addr flush dev eth3 && ip addr add 192.218.3.1/24 dev eth3
+ip link set eth4 up && ip addr flush dev eth4 && ip addr add 192.218.4.1/24 dev eth4
+
+sysctl -w net.ipv4.ip_forward=1
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null
+
+pkill dhcrelay 2>/dev/null
+dhcrelay -4 -i eth2 -i eth3 -i eth4 192.218.4.10
+EOF
+chmod +x /root/autostart_relay.sh
+
+# Daftarkan pada /etc/rc.local dan /root/.bashrc
+cat << 'EOF' > /etc/rc.local
+#!/bin/bash
+/root/autostart_relay.sh
+exit 0
+EOF
+chmod +x /etc/rc.local
+grep -q "autostart_relay.sh" /root/.bashrc || echo '/root/autostart_relay.sh' >> /root/.bashrc
+```
+
+---
+
+#### 2. Verifikasi Status Layanan Pasca-Restart
+
+Kedua node (`tengen` dan `jichi`) di-restart melalui manajemen perangkat GNS3. Setelah proses boot selesai, status proses diperiksa pada masing-masing terminal:
+
+* **Pemeriksaan Layanan pada tengen**:  
+  Proses daemon `dhcpd` langsung berstatus aktif dan mendengarkan antarmuka `eth0`:
+  ```bash
+  ps aux | grep dhcpd
+  ```
+  Output menampilkan baris proses `/usr/sbin/dhcpd -4 -q -cf /etc/dhcp/dhcpd.conf eth0` aktif di latar belakang.
+  ![Status Autostart DHCP Server tengen](Screenshot/10.1-autostart-tengen.png)
+
+* **Pemeriksaan Layanan pada jichi**:  
+  Kernel IP forwarding aktif (`net.ipv4.ip_forward = 1`) dan proses daemon `dhcrelay` langsung berjalan:
+  ```bash
+  ps aux | grep dhcrelay
+  ```
+  Output membuktikan relay agent aktif mendengarkan antarmuka `eth2`, `eth3`, dan `eth4` menuju target `192.218.4.10`.
+  ![Status Autostart DHCP Relay jichi](Screenshot/10.2-autostart-jichi.png)
+
+---
+
+#### 3. Verifikasi Kebijakan Alokasi dan Konektivitas Klien
+
+Permohonan alamat dinamis diuji ulang pada seluruh kelompok klien di Divisi A dan Divisi B setelah restart untuk memverifikasi konsistensi parameter:
+
+| Node Klien | Wilayah / Kebijakan | Alamat IP Didapat | Durasi Sewa (*Lease*) | Default Gateway | Uji Konektivitas Ping |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **itadori** | Divisi A (Pool 1) | `192.218.2.11` | 600 detik | `192.218.2.1` | Berhasil (0% packet loss) |
+| **zenin** | Divisi A (Pool 2) | `192.218.2.70` | 600 detik | `192.218.2.1` | Berhasil (0% packet loss) |
+| **ino** | Divisi B (Short Lease) | `192.218.3.11` | 1800 detik (30 mnt) | `192.218.3.1` | Berhasil (0% packet loss) |
+| **miwa** | Divisi B (Long Lease) | `192.218.3.100` | 43200 detik (12 jam) | `192.218.3.1` | Berhasil (0% packet loss) |
+| **kugisaki** | Divisi B (VIP Static) | `192.218.3.99` | Static (Fixed) | `192.218.3.1` | Berhasil (0% packet loss) |
+
+**A. Verifikasi Klien Divisi A (Network 2)**  
+Klien `itadori` dan `zenin` dieksekusi dengan perintah `udhcpc -i eth0`, menghasilkan alamat IP yang konsisten pada blok Pool 1 dan Pool 2. Uji ping ke router gateway `192.218.2.1` menunjukkan konektivitas berjalan normal.
+![Verifikasi Klien Divisi A Pasca-Restart](Screenshot/10.3-verifikasi-klien-net2.png)
+
+**B. Verifikasi Klien Divisi B (Network 3)**  
+Klien `ino` tetap menerima alokasi dengan lease time 1800 detik, `miwa` dengan lease time 43200 detik, serta `kugisaki` menerima reservasi alamat tetap `192.218.3.99`. Seluruh node dapat menjangkau router gateway `192.218.3.1`.
+![Verifikasi Klien Divisi B Pasca-Restart](Screenshot/10.4-verifikasi-klien-net3.png)
